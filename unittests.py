@@ -3,6 +3,7 @@ import subprocess
 import numpy as np
 from viterbi import Viterbi
 
+np.random.seed(0)
 polynomes = [0o133, 0o171] 
 baseline_viterbi = Viterbi(7, polynomes)
 exe = os.path.join(os.getcwd(), "build", "viterbi_decoder")
@@ -19,6 +20,9 @@ def run(argv):
 def main():
     bits_arr = np.random.randint(0,2, 50)
     bits = "".join(map(str, bits_arr))
+    
+    print(f"\n{bin(polynomes[0])} {bin(polynomes[1])}")
+    print(f"\n{bits}\n")
     
     polys = [bin(p)[2:] for p in polynomes]
     
