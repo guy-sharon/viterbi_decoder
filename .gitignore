@@ -1,3 +1,6 @@
 .vscode/
 build/
 venv/
+gmon.out
+analysis.txt
+tests/__pycache__/

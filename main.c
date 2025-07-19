@@ -13,7 +13,7 @@
 #define MAX_POLYNOME_LENGTH             32
 #define MAX_POLYNOMES                   16
 #define MAX_METRIC                      ( UINT_MAX >> 1 )
-#define MAX_DECODE_LEN_BITS             ( 1 << 10 ) // enfore power of 2!
+#define MAX_DECODE_LEN_BITS             ( 1 << 14 ) // enfore power of 2!
 #define NUM_BITS_IN_INT                 ( 8*sizeof(unsigned int) )
 
 // **************************************************** //
@@ -35,22 +35,15 @@ typedef struct Node
 // ************************************************** //
 // ********************* static ********************* //
 // ************************************************** //
+static const char *program_name = "viterbi_decoder";
 static unsigned int polynomes[MAX_POLYNOMES] = { 0 };
 static unsigned char polynome_count = 0;
 static unsigned int depth = 0;
 static unsigned int depth_mask = 0;
 static encbit_t encbit;
 static unsigned int next_node_ind = 0;
-
-#ifdef DEBUG
-    static struct Node nodes[(1<<7) * 50 / 2];
-    static unsigned char trellis[1 << 10];
-#else
-    static struct Node *nodes;
-    static unsigned char *trellis;
-#endif
-
-static const char *program_name = "viterbi_decoder";
+static struct Node *nodes;
+static unsigned char *trellis;
 
 
 // ************************************************************ //
@@ -157,23 +150,23 @@ void decode(int argc, char *argv[]) {
 
     // trellis
     int num_states = 1 << depth;
-#ifndef DEBUG
+
+    //------------------------------------- parents --- children (2 children per parent)
+    nodes = malloc(sizeof(struct Node) * (num_states + num_states*2));
+
     trellis = malloc(num_states * 2 * sizeof(unsigned char));
-#endif
     for (state_t state = 0; state < num_states; state++)
     {
+        unsigned int state_shift = state << 1;
         for (bit_t bit = 0; bit < 2; bit++)
         {
-            (void)encode_bit(0, state, &encbit);
-            trellis[state + (bit << polynome_count)] = encbit;
+            (void)encode_bit(bit, state, &encbit);
+            trellis[state_shift + bit] = encbit;
         }
     }
     
     char *bits = argv[argc-1];
     int len = strlen(bits);
-#ifndef DEBUG
-    nodes = malloc(num_states * len / polynome_count * sizeof(struct Node));
-#endif
     memset(nodes, 0, sizeof(nodes));
     state_t state = 0;
 
@@ -188,8 +181,8 @@ void decode(int argc, char *argv[]) {
     }
     struct Node *children = &nodes[num_states];
 
-    unsigned int *state_min_metric      = malloc(num_states * sizeof(unsigned int));
-    int *state_min_metric_ind  = malloc(num_states * sizeof(int));
+    unsigned int *state_min_metric = malloc(num_states * sizeof(unsigned int));
+    int *state_min_metric_ind      = malloc(num_states * sizeof(int));
 
     unsigned int bit_ind = 0;
     while (bit_ind < len)
@@ -212,11 +205,16 @@ void decode(int argc, char *argv[]) {
         for (unsigned int i = 0; i < num_states; i++)
         {
             struct Node *parent = &parents[i]; 
+            unsigned int state_shift = parent->state << 1;
             for (bit_t bit = 0; bit < 2; bit++)
             {
                 unsigned int child_ind = (i<<1) + bit;
                 struct Node *child = &children[child_ind];
-                state_t next_state = encode_bit(bit, parent->state, &encbit);
+
+                //state_t next_state = encode_bit(bit, parent->state, &encbit);
+                state_t next_state = ( (state_shift) | bit ) & depth_mask;
+                encbit = trellis[state_shift + bit];
+
                 unsigned int ham_dist = hamming_dist(in_encbit, encbit);
                 chain_node(child, parent, bit, ham_dist, next_state);
 
@@ -257,6 +255,9 @@ void decode(int argc, char *argv[]) {
     
     printf("\n");
     unsigned int q = 3;
+
+    free(state_min_metric);
+    free(state_min_metric_ind);
 }
 
 
@@ -289,9 +290,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-#ifndef DEBUG
     if (trellis) free(trellis);
-#endif
-    
+    if (nodes) free(nodes);
+
     return 0;
 }
