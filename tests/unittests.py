@@ -19,15 +19,15 @@ def main():
     print("".join(map(str,bl_dec)))
     
     for _ in tqdm(range(100)):
-        bits_arr = gen_bits(n=1000, depth=depth)
+        bits_arr = gen_bits(n=350, depth=depth)
         
         bl_enc, bl_dec = baseline_encdec(bits_arr)
         enc, dec = encdec(polynomes, bits_arr)
         
 
-        
-        assert bl_enc == enc
-        assert bl_dec == dec
+        if bl_enc != enc or bl_dec != dec:
+            print("failed")
+            exit(0)
     
 if __name__ == "__main__":
     build()

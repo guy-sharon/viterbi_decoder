@@ -5,8 +5,8 @@ import time
 def main():
     num_iters = 100
     num_polys = 2
-    poly_len = 8
-    n = 1000
+    poly_len = 15
+    n = 350
     
     #
     polys = []

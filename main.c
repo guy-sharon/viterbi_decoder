@@ -5,17 +5,33 @@
 #include <assert.h>
 #include <immintrin.h>
 
+/* perf with: 
+cc -Ofast -mavx -march=native -g -o viterbi_decoder_prof main.c && sudo perf record ./viterbi_decoder_prof -dec 1000000000000001001 10000000000101011 01011010111101011001010000001101111011010111101100100110010011010010010011100001010011100010111001000001100110011101010000101101101011110101010010110010000101011000011011001011101110000000100001100000111100001101100010101011111110001001101100011011101111011101110001110011111011011110101110111000001010000100010000100000111100110011101111001011100101 && sudo hotspot
+*/
+
+// ************************************************** //
+// ********************* config ********************* //
+// ************************************************** //
+#define MAX_POLYNOME_LENGTH                         32
+#define MAX_POLYNOMES                               16
+#define MAX_METRIC                                  ( UINT_MAX >> 1 )
+#define MAX_DECODE_LEN_BITS                         ( 1 << 9 )
+
+#define STATIC_ALLOC                                ( 0 )
+#if STATIC_ALLOC
+    #define MAX_NUM_STATES                          ( 1 << MAX_POLYNOME_LENGTH )
+#endif
+
 // *************************************************** //
 // ********************* defines ********************* //
 // *************************************************** //
 #define MAX(a,b)            ( a > b ? a : b )
 #define MIN(a,b)            ( a < b ? a : b )
 
-#define MAX_POLYNOME_LENGTH             32
-#define MAX_POLYNOMES                   16
-#define MAX_METRIC                      ( UINT_MAX >> 1 )
-#define MAX_DECODE_LEN_BITS             ( 1 << 14 ) // enfore power of 2!
-#define NUM_BITS_IN_INT                 ( 8*sizeof(unsigned int) )
+#define NUM_BITS_IN_INT                             ( 8*sizeof(unsigned int) )
+#define NODE_BITS_ARR_NUM_INTS                      ( ((MAX_DECODE_LEN_BITS / NUM_BITS_IN_INT) + 7) & ~7 )
+#define NODE_SIZE                                   ( 4*NODE_BITS_ARR_NUM_INTS + 4 )
+#define NODE_PAD                                    ( 32 - (NODE_SIZE % 32) )
 
 // **************************************************** //
 // ********************* typedefs ********************* //
@@ -26,13 +42,13 @@ typedef unsigned char bit_t;
 
 typedef struct Node
 {
+    unsigned int bits[NODE_BITS_ARR_NUM_INTS];
     unsigned int metric;
     state_t state;
     int bits_ind;
     bit_t new_bit;
-    unsigned int bits[MAX_DECODE_LEN_BITS / NUM_BITS_IN_INT];
-} __attribute__((aligned(32))) Node;
-
+    int pad[NODE_PAD];
+} Node;
 
 // ************************************************** //
 // ********************* static ********************* //
@@ -44,8 +60,14 @@ static unsigned int depth = 0;
 static unsigned int depth_mask = 0;
 static encbit_t encbit;
 static unsigned int next_node_ind = 0;
-static struct Node *nodes;
-static unsigned char *trellis;
+
+#if STATIC_ALLOC
+    static struct Node __attribute__((aligned(32))) nodes[MAX_NUM_STATES + MAX_NUM_STATES*2];
+    static unsigned char trellis[MAX_NUM_STATES * 2];
+#else
+    static struct Node* __attribute__((aligned(32))) nodes;
+    static unsigned char *trellis;
+#endif
 
 
 // ************************************************************ //
@@ -182,7 +204,10 @@ static void init_parents(struct Node *parents, int num_states)
 
 static void calc_trellis(int num_states)
 {
+#if !STATIC_ALLOC
     trellis = malloc(num_states * 2 * sizeof(unsigned char));
+#endif
+
     for (state_t state = 0; state < num_states; state++)
     {
         unsigned int state_shift = state << 1;
@@ -192,6 +217,37 @@ static void calc_trellis(int num_states)
             trellis[state_shift + bit] = encbit;
         }
     }
+}
+
+static void init_states_metrics_map(int num_states, unsigned int *state_min_metric, int *state_min_metric_ind)
+{
+    for (int i = 0; i < num_states; i++)
+    {
+        state_min_metric[i] = MAX_METRIC;
+        state_min_metric_ind[i] = -1;
+    }
+} 
+
+static void pack_bits(unsigned char *bits, unsigned int num_bits, encbit_t *out)
+{
+    encbit_t res = 0;
+    for (int i = 0; i < num_bits; i++)
+    {
+        bit_t bit = bits[i] == '1';
+        res |= (bit << i);
+    }
+    *out = res;
+}
+
+static void copy_node(struct Node *dst, struct Node *src)
+{
+    dst->metric = src->metric;
+    dst->state = src->state;
+    dst->new_bit = src->new_bit;
+    dst->bits_ind = src->bits_ind;
+    unsigned int int_num = src->bits_ind / NUM_BITS_IN_INT;
+
+    aligned_memcpy((unsigned int *)&dst->bits, (unsigned int *)&src->bits, 8 * (1 + (int_num + 1) / 8));
 }
 
 void decode(int argc, char *argv[])
@@ -206,7 +262,20 @@ void decode(int argc, char *argv[])
     calc_trellis(num_states);
 
     //------------------------------------- parents --- children (2 children per parent)
-    nodes = malloc(sizeof(struct Node) * (num_states + num_states*2));
+#if STATIC_ALLOC
+        unsigned int state_min_metric[MAX_NUM_STATES];
+        int state_min_metric_ind[MAX_NUM_STATES];
+#else
+        int ret = posix_memalign((void**)&nodes, 32, sizeof(struct Node) * (num_states + num_states*2));
+        if (ret)
+        {
+            printf("posix_memalign err (%d)... exiting...\n", ret);
+            exit(1);
+        }
+        unsigned int *state_min_metric  = malloc(sizeof(unsigned int) * num_states);
+        int *state_min_metric_ind       = malloc(sizeof(int) * num_states);
+#endif
+
     memset(nodes, 0, sizeof(nodes));    
     
     // parents and children
@@ -214,27 +283,17 @@ void decode(int argc, char *argv[])
     struct Node *children = &nodes[num_states];
     init_parents(parents, num_states);
     
-    unsigned int *state_min_metric = malloc(num_states * sizeof(unsigned int));
-    int *state_min_metric_ind      = malloc(num_states * sizeof(int));
     
     unsigned int bit_ind = 0;
-    char *bits = argv[argc-1];
+    unsigned char *bits = argv[argc-1];
     int len = strlen(bits);
+    encbit_t in_encbit = 0;
     while (bit_ind < len)
     {
-        for (int i = 0 ; i < num_states; i++)
-        {
-            state_min_metric[i] = MAX_METRIC;
-            state_min_metric_ind[i] = -1;
-        }
+        init_states_metrics_map(num_states, state_min_metric, state_min_metric_ind);
 
-        // pack in-encoded-bits
-        encbit_t in_encbit = 0;
-        for (int i = 0; i < polynome_count; i++)
-        {
-            bit_t bit = bits[bit_ind++] == '1';
-            in_encbit |= (bit << i);
-        }
+        pack_bits(&bits[bit_ind], polynome_count, &in_encbit);
+        bit_ind += polynome_count;
 
         // calculate next column of trellis
         for (unsigned int i = 0; i < num_states; i++)
@@ -246,17 +305,15 @@ void decode(int argc, char *argv[])
                 unsigned int child_ind = (i<<1) + bit;
                 struct Node *child = &children[child_ind];
 
-                //state_t next_state = encode_bit(bit, parent->state, &encbit);
-                state_t next_state = ( (state_shift) | bit ) & depth_mask;
+                state_t next_state = ( state_shift | bit ) & depth_mask;
                 encbit = trellis[state_shift + bit];
 
                 unsigned int ham_dist = hamming_dist(in_encbit, encbit);
-                chain_node(child, parent, bit, ham_dist, next_state);
-
-                if ( child->metric < state_min_metric[next_state] )
+                if ( (ham_dist + parent->metric) < state_min_metric[next_state] )
                 {
-                     state_min_metric[next_state] = child->metric;
-                     state_min_metric_ind[next_state] = child_ind;
+                    chain_node(child, parent, bit, ham_dist, next_state);
+                    state_min_metric[next_state] = child->metric;
+                    state_min_metric_ind[next_state] = child_ind;
                 }
             }
         }
@@ -265,16 +322,7 @@ void decode(int argc, char *argv[])
         for (unsigned int i = 0; i < num_states; i++)
         {
             struct Node* best_child = &children[state_min_metric_ind[i]];
-            //parents[i] = *best_child;
-            parents[i].metric = best_child->metric;
-            parents[i].state = best_child->state;
-            parents[i].new_bit = best_child->new_bit;
-            parents[i].bits_ind = best_child->bits_ind;
-            unsigned int int_num = best_child->bits_ind / NUM_BITS_IN_INT;
-
-            aligned_memcpy((unsigned int*)&parents[i].bits, (unsigned int*)&best_child->bits, 8*(1+(int_num+1)/8));
-
-            //append_new_bit(&parents[i]);
+            copy_node(&parents[i], best_child);
         }
         bit_t q = 0;
     }
@@ -302,8 +350,10 @@ void decode(int argc, char *argv[])
     printf("\n");
     unsigned int q = 3;
 
+#if !STATIC_ALLOC
     free(state_min_metric);
     free(state_min_metric_ind);
+#endif
 }
 
 // ************************************************ //
@@ -335,8 +385,10 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+#if !STATIC_ALLOC
     if (trellis) free(trellis);
     if (nodes) free(nodes);
+#endif
 
     return 0;
 }
