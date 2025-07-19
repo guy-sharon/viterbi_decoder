@@ -3,6 +3,7 @@
 #include <string.h>
 #include <limits.h>
 #include <assert.h>
+#include <immintrin.h>
 
 // *************************************************** //
 // ********************* defines ********************* //
@@ -28,8 +29,9 @@ typedef struct Node
     unsigned int metric;
     state_t state;
     int bits_ind;
+    bit_t new_bit;
     unsigned int bits[MAX_DECODE_LEN_BITS / NUM_BITS_IN_INT];
-} Node;
+} __attribute__((aligned(32))) Node;
 
 
 // ************************************************** //
@@ -81,6 +83,20 @@ static void parse_polynomes(int argc, char *argv[])
     }
 }
 
+static void aligned_memcpy(unsigned int *dst, const unsigned int *src, size_t count) {
+    size_t i;
+
+    // Process 8 unsigned ints (8 × 4 = 32 bytes) at a time
+    for (i = 0; i + 8 <= count; i += 8) {
+        __m256i val = _mm256_load_si256((__m256i *)&src[i]);  // aligned load
+        _mm256_store_si256((__m256i *)&dst[i], val);          // aligned store
+    }
+
+    // Copy any remaining elements
+    for (; i < count; ++i) {
+        dst[i] = src[i];
+    }
+}
 
 // ************************************************** //
 // ********************* Encode ********************* //
@@ -130,30 +146,42 @@ static int hamming_dist(encbit_t in_encbit, encbit_t encbit)
     return __builtin_popcount(in_encbit ^ encbit);
 }
 
+static void append_new_bit(struct Node *pNode)
+{
+    pNode->bits_ind++;
+    unsigned int int_num = pNode->bits_ind / NUM_BITS_IN_INT;
+    unsigned int bit_offset = pNode->bits_ind - int_num*NUM_BITS_IN_INT;
+    pNode->bits[int_num] |= pNode->new_bit << bit_offset;
+}
+
 static void chain_node(struct Node *child, struct Node *parent, bit_t bit, unsigned int ham_dist, state_t state)
 {
     child->metric = parent->metric + ham_dist;
     child->state = state;
+    child->new_bit = bit;
     
     child->bits_ind = parent->bits_ind + 1;
     unsigned int int_num = child->bits_ind / NUM_BITS_IN_INT;
     unsigned int bit_offset = child->bits_ind - int_num*NUM_BITS_IN_INT;
-    memcpy(&child->bits, parent->bits, sizeof(child->bits));
+
+    aligned_memcpy((unsigned int*)&child->bits, (unsigned int*)&parent->bits, 8*(1+(int_num+1)/8));
+
     child->bits[int_num] |= bit << bit_offset;
 }
 
-void decode(int argc, char *argv[]) {
-    if (argc < 3) {
-        fprintf(stderr, "Usage: %s -dec <polynome0> <polynome1> ... <polynomeN-1> <encoded_bits>\n", program_name);
-        return;
+static void init_parents(struct Node *parents, int num_states)
+{
+    parents[0].bits_ind = -1;
+    for (unsigned int i = 1; i < num_states; i++)
+    {
+        parents[i].metric = 0; // MAX_METRIC;
+        parents[i].state = i;
+        parents[i].bits_ind = -1;
     }
+}
 
-    // trellis
-    int num_states = 1 << depth;
-
-    //------------------------------------- parents --- children (2 children per parent)
-    nodes = malloc(sizeof(struct Node) * (num_states + num_states*2));
-
+static void calc_trellis(int num_states)
+{
     trellis = malloc(num_states * 2 * sizeof(unsigned char));
     for (state_t state = 0; state < num_states; state++)
     {
@@ -164,27 +192,34 @@ void decode(int argc, char *argv[]) {
             trellis[state_shift + bit] = encbit;
         }
     }
-    
-    char *bits = argv[argc-1];
-    int len = strlen(bits);
-    memset(nodes, 0, sizeof(nodes));
-    state_t state = 0;
+}
 
-
-    struct Node *parents = &nodes[0];
-    parents[0].bits_ind = -1;
-    for (unsigned int i = 1; i < num_states; i++)
-    {
-        parents[i].metric = 0; // MAX_METRIC;
-        parents[i].state = i;
-        parents[i].bits_ind = -1;
+void decode(int argc, char *argv[])
+{
+    if (argc < 3) {
+        fprintf(stderr, "Usage: %s -dec <polynome0> <polynome1> ... <polynomeN-1> <encoded_bits>\n", program_name);
+        return;
     }
-    struct Node *children = &nodes[num_states];
 
+    // trellis
+    int num_states = 1 << depth;
+    calc_trellis(num_states);
+
+    //------------------------------------- parents --- children (2 children per parent)
+    nodes = malloc(sizeof(struct Node) * (num_states + num_states*2));
+    memset(nodes, 0, sizeof(nodes));    
+    
+    // parents and children
+    struct Node *parents = &nodes[0];
+    struct Node *children = &nodes[num_states];
+    init_parents(parents, num_states);
+    
     unsigned int *state_min_metric = malloc(num_states * sizeof(unsigned int));
     int *state_min_metric_ind      = malloc(num_states * sizeof(int));
-
+    
     unsigned int bit_ind = 0;
+    char *bits = argv[argc-1];
+    int len = strlen(bits);
     while (bit_ind < len)
     {
         for (int i = 0 ; i < num_states; i++)
@@ -229,7 +264,17 @@ void decode(int argc, char *argv[]) {
         // eliminate half of the children
         for (unsigned int i = 0; i < num_states; i++)
         {
-            parents[i] = children[state_min_metric_ind[i]];
+            struct Node* best_child = &children[state_min_metric_ind[i]];
+            //parents[i] = *best_child;
+            parents[i].metric = best_child->metric;
+            parents[i].state = best_child->state;
+            parents[i].new_bit = best_child->new_bit;
+            parents[i].bits_ind = best_child->bits_ind;
+            unsigned int int_num = best_child->bits_ind / NUM_BITS_IN_INT;
+
+            aligned_memcpy((unsigned int*)&parents[i].bits, (unsigned int*)&best_child->bits, 8*(1+(int_num+1)/8));
+
+            //append_new_bit(&parents[i]);
         }
         bit_t q = 0;
     }
@@ -246,6 +291,7 @@ void decode(int argc, char *argv[]) {
     }
 
     struct Node chosen = parents[min_metric_ind];
+    //append_new_bit(&chosen);
     for (int i = 0; i < chosen.bits_ind+1; i++) {
         unsigned int int_num = i / NUM_BITS_IN_INT;
         unsigned int bit_offset = i - int_num*NUM_BITS_IN_INT;  
@@ -259,7 +305,6 @@ void decode(int argc, char *argv[]) {
     free(state_min_metric);
     free(state_min_metric_ind);
 }
-
 
 // ************************************************ //
 // ********************* Main ********************* //

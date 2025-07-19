@@ -13,11 +13,18 @@ def baseline_encdec(bits_arr):
     return enc, dec
 
 def main():
+    bits_arr = gen_bits(n=10, depth=depth)
+    bl_enc, bl_dec = baseline_encdec(bits_arr)
+    print("".join(map(str,bl_enc)))
+    print("".join(map(str,bl_dec)))
+    
     for _ in tqdm(range(100)):
         bits_arr = gen_bits(n=1000, depth=depth)
         
         bl_enc, bl_dec = baseline_encdec(bits_arr)
         enc, dec = encdec(polynomes, bits_arr)
+        
+
         
         assert bl_enc == enc
         assert bl_dec == dec
