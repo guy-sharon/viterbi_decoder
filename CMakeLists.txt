@@ -8,4 +8,4 @@ set(CMAKE_C_STANDARD 17)
 set(CMAKE_BUILD_TYPE Debug)
 
 add_executable(viterbi_decoder ${SOURCES})
-target_compile_options(viterbi_decoder PRIVATE -Ofast -mavx -march=native)
+target_compile_options(viterbi_decoder PRIVATE -O0 -mavx -march=native)
