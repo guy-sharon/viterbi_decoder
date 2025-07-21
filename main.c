@@ -210,21 +210,23 @@ static void copy_node(struct Node *dst, struct Node *src)
     dst->bits_ind = src->bits_ind;
     dst->bit_state_map_ind = src->bit_state_map_ind;
 
+
+    unsigned int int_num = src->bits_ind / NUM_BITS_IN_INT;
+    unsigned int bit_offset = src->bits_ind - int_num*NUM_BITS_IN_INT;
+
     dst->bitstate_ind = src->bitstate_ind;
     struct Bitstate *bitstate = &bitstates[dst->bitstate_ind];
     if (bitstate->num_refs > 1)
     {
         bitstates_free_slots_cnt--;
-        unsigned int available_bitstate_slot = bitstates_free_slots[bitstates_free_slots_cnt];
-        memcpy(&bitstates[available_bitstate_slot].bits,
-               &bitstate->bits, sizeof(bitstates[0].bits));
+        unsigned int available_bitstate_slot = bitstates_free_slots[bitstates_free_slots_cnt]; 
+        aligned_memcpy((unsigned int*)&bitstates[available_bitstate_slot].bits,
+               (unsigned int*)&bitstate->bits, sizeof(bitstates[0].bits)/sizeof(int));
         dst->bitstate_ind = available_bitstate_slot;
         bitstate = &bitstates[available_bitstate_slot];
     }   
     bitstates[src->bitstate_ind].num_refs--;
 
-    unsigned int int_num = src->bits_ind / NUM_BITS_IN_INT;
-    unsigned int bit_offset = src->bits_ind - int_num*NUM_BITS_IN_INT;
     bitstate->bits[int_num] |= src->new_bit << bit_offset;
     
     //aligned_memcpy((unsigned int *)&dst->bits, (unsigned int *)&src->bits, 8 * (1 + (int_num + 1) / 8));

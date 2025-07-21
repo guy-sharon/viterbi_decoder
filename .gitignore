@@ -4,3 +4,5 @@ venv/
 gmon.out
 analysis.txt
 tests/__pycache__/
+perf*
+viterbi_decoder_prof
