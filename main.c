@@ -62,7 +62,8 @@ typedef struct Bitstate
     int pad[BITSTATE_PAD];
 } Bitstate;
 
-
+unsigned int *bitstates_free_slots;
+unsigned int bitstates_free_slots_cnt = 0;
 
 // ************************************************** //
 // ********************* static ********************* //
@@ -191,6 +192,16 @@ static int hamming_dist(encbit_t in_encbit, encbit_t encbit)
     pNode->bits[int_num] |= pNode->new_bit << bit_offset;
 }*/
 
+static void unref(unsigned int ind)
+{
+    if (bitstates[ind].num_refs <= 1)
+    {
+        bitstates[ind].num_refs = 0;
+        bitstates_free_slots[bitstates_free_slots_cnt++] = ind;
+    }
+    else bitstates[ind].num_refs--;
+}
+
 static void copy_node(struct Node *dst, struct Node *src)
 {
     dst->metric = src->metric;
@@ -200,9 +211,17 @@ static void copy_node(struct Node *dst, struct Node *src)
     dst->bit_state_map_ind = src->bit_state_map_ind;
 
     dst->bitstate_ind = src->bitstate_ind;
-    bitstates[dst->bitstate_ind].num_refs = 0;
+    if (bitstates[dst->bitstate_ind].num_refs > 1)
+    {
+        bitstates_free_slots_cnt--;
+        unsigned int available_bitstate_slot = bitstates_free_slots[bitstates_free_slots_cnt];
+        memcpy(&bitstates[available_bitstate_slot].bits,
+               &bitstates[dst->bitstate_ind].bits, sizeof(bitstates[0].bits));
+    }
+    bitstates[dst->bitstate_ind].num_refs--;
 
-    //unsigned int int_num = src->bits_ind / NUM_BITS_IN_INT;
+    unsigned int int_num = src->bits_ind / NUM_BITS_IN_INT;
+    
     //aligned_memcpy((unsigned int *)&dst->bits, (unsigned int *)&src->bits, 8 * (1 + (int_num + 1) / 8));
 }
 
@@ -306,6 +325,7 @@ void decode(int argc, char *argv[])
 #else
         nodes                           = (struct Node*)memalign(32, sizeof(struct Node) * (num_states + num_states*2));
         bitstates                       = (struct Bitstate*)memalign(32, sizeof(struct Bitstate) * num_states);
+        bitstates_free_slots            = malloc(sizeof(unsigned int)*num_states);
         unsigned int *state_min_metric  = malloc(sizeof(unsigned int) * num_states);
         int *state_min_metric_ind       = malloc(sizeof(int) * num_states);
         unsigned int *bits_state_map    = malloc(sizeof(unsigned int) * num_states * NODE_BITS_ARR_NUM_INTS);
@@ -337,6 +357,7 @@ void decode(int argc, char *argv[])
         {
             struct Node *parent = &parents[i]; 
             unsigned int state_shift = parent->state << 1;
+            unsigned char has_replicated = 0;
             for (bit_t bit = 0; bit < 2; bit++)
             {
                 unsigned int child_ind = (i<<1) + bit;
@@ -348,10 +369,11 @@ void decode(int argc, char *argv[])
                 unsigned int ham_dist = hamming_dist(in_encbit, encbit);
                 if ( (ham_dist + parent->metric) < state_min_metric[next_state] )
                 {
+                    has_replicated = 1;
                     if (state_min_metric_ind[next_state] != -1)
                     {
                         struct Node *dethroned_child = &children[state_min_metric_ind[next_state]];
-                        bitstates[dethroned_child->bitstate_ind].num_refs--;
+                        unref(dethroned_child->bitstate_ind);
                         int q = 3;
                     }
                     chain_node(child, parent, bit, ham_dist, next_state);
@@ -359,8 +381,15 @@ void decode(int argc, char *argv[])
                     state_min_metric_ind[next_state] = child_ind;
                 }
             }
+            if (has_replicated == 0)
+                unref(parent->bitstate_ind);
         }
 
+        int sum = 0;
+        for (int i =0 ; i < num_states; i++)
+        {
+            sum += bitstates[children[state_min_metric_ind[i]].bitstate_ind].num_refs;
+        }
         // eliminate half of the children
         //memset(states_taken, 0, sizeof(states_taken));
         for (unsigned int i = 0; i < num_states; i++)
