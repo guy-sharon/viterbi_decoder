@@ -211,16 +211,21 @@ static void copy_node(struct Node *dst, struct Node *src)
     dst->bit_state_map_ind = src->bit_state_map_ind;
 
     dst->bitstate_ind = src->bitstate_ind;
-    if (bitstates[dst->bitstate_ind].num_refs > 1)
+    struct Bitstate *bitstate = &bitstates[dst->bitstate_ind];
+    if (bitstate->num_refs > 1)
     {
         bitstates_free_slots_cnt--;
         unsigned int available_bitstate_slot = bitstates_free_slots[bitstates_free_slots_cnt];
         memcpy(&bitstates[available_bitstate_slot].bits,
-               &bitstates[dst->bitstate_ind].bits, sizeof(bitstates[0].bits));
-    }
-    bitstates[dst->bitstate_ind].num_refs--;
+               &bitstate->bits, sizeof(bitstates[0].bits));
+        dst->bitstate_ind = available_bitstate_slot;
+        bitstate = &bitstates[available_bitstate_slot];
+    }   
+    bitstates[src->bitstate_ind].num_refs--;
 
     unsigned int int_num = src->bits_ind / NUM_BITS_IN_INT;
+    unsigned int bit_offset = src->bits_ind - int_num*NUM_BITS_IN_INT;
+    bitstate->bits[int_num] |= src->new_bit << bit_offset;
     
     //aligned_memcpy((unsigned int *)&dst->bits, (unsigned int *)&src->bits, 8 * (1 + (int_num + 1) / 8));
 }
@@ -385,10 +390,11 @@ void decode(int argc, char *argv[])
                 unref(parent->bitstate_ind);
         }
 
-        int sum = 0;
+        int sum = 0, sum0 = 0;
         for (int i =0 ; i < num_states; i++)
         {
-            sum += bitstates[children[state_min_metric_ind[i]].bitstate_ind].num_refs;
+            sum += bitstates[i].num_refs;
+            sum0 += bitstates[i].num_refs == 0;
         }
         // eliminate half of the children
         //memset(states_taken, 0, sizeof(states_taken));
@@ -412,12 +418,13 @@ void decode(int argc, char *argv[])
     }
 
     struct Node chosen = parents[min_metric_ind];
+    struct Bitstate *bitstate = &bitstates[chosen.bitstate_ind];
     //append_new_bit(&chosen);
     for (int i = 0; i < chosen.bits_ind+1; i++) {
         unsigned int int_num = i / NUM_BITS_IN_INT;
         unsigned int bit_offset = i - int_num*NUM_BITS_IN_INT;  
-        //unsigned int val = chosen.bits[int_num];
-        //printf("%d", (bit_t)((val & (1<<bit_offset)) >> bit_offset));
+        unsigned int val = bitstate->bits[int_num];
+        printf("%d", (bit_t)((val & (1<<bit_offset)) >> bit_offset));
     }
     
     printf("\n");
